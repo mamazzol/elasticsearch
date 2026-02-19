@@ -10,6 +10,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.elasticsearch.ElasticsearchSecurityException;
 import org.elasticsearch.action.ActionListener;
+import org.elasticsearch.action.support.PlainActionFuture;
 import org.elasticsearch.common.util.concurrent.ThreadContext;
 import org.elasticsearch.rest.RestChannel;
 import org.elasticsearch.rest.RestHandler;
@@ -21,6 +22,7 @@ import org.elasticsearch.xpack.security.audit.AuditTrailService;
 import org.elasticsearch.xpack.security.authc.support.SecondaryAuthenticator;
 import org.elasticsearch.xpack.security.authz.restriction.WorkflowService;
 import org.elasticsearch.xpack.security.operator.OperatorPrivileges;
+import org.elasticsearch.xpack.core.security.authc.support.SecondaryAuthentication;
 
 import java.util.function.Consumer;
 
@@ -70,6 +72,33 @@ public class SecurityRestFilter implements RestInterceptor {
 
         if (enabled == false) {
             listener.onResponse(Boolean.TRUE);
+            return;
+        }
+
+        if (Thread.currentThread().isVirtual()) {
+            RestRequest aggregatedRestRequest = request;
+            try {
+                if (request.isStreamedContent() && auditTrailService.includeRequestBody()) {
+                    aggregatedRestRequest = PlainActionFuture.await(l -> aggregate(request, l::onResponse));
+                }
+
+                final RestRequest wrappedRequest = maybeWrapRestRequest(aggregatedRestRequest, targetHandler);
+                auditTrailService.get().authenticationSuccess(wrappedRequest);
+                final SecondaryAuthentication secondaryAuthentication = PlainActionFuture.await(
+                    l -> secondaryAuthenticator.authenticateAndAttachToContext(wrappedRequest, l)
+                );
+                if (secondaryAuthentication != null) {
+                    logger.trace(
+                        "Found secondary authentication {} in REST request [{}]",
+                        secondaryAuthentication,
+                        aggregatedRestRequest.uri()
+                    );
+                }
+                WorkflowService.resolveWorkflowAndStoreInThreadContext(targetHandler, threadContext);
+                doHandleRequest(aggregatedRestRequest, channel, targetHandler, listener);
+            } catch (Exception e) {
+                handleException(aggregatedRestRequest, e, listener);
+            }
             return;
         }
 

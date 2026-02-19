@@ -1,3 +1,5 @@
+import org.elasticsearch.gradle.internal.test.RestIntegTestTask
+
 apply plugin: 'elasticsearch.build'
 apply plugin: 'elasticsearch.publish'
 apply plugin: 'elasticsearch.rest-resources'
@@ -39,6 +41,23 @@ dependencies {
   clusterModules project(':modules:analysis-common')
   clusterModules project(':modules:health-shards-availability')
   clusterModules project(':modules:data-streams')
+}
+
+tasks.named('yamlRestTest').configure {
+  filter {
+    excludeTestsMatching 'org.elasticsearch.test.rest.VirtualThreadClientYamlTestSuiteIT'
+  }
+}
+
+tasks.register('yamlRestTestVirtualThreads', RestIntegTestTask) {
+  description = 'Runs YAML REST tests with virtual threads enabled on the cluster'
+  group = JavaBasePlugin.VERIFICATION_GROUP
+  testClassesDirs = sourceSets.yamlRestTest.output.classesDirs
+  classpath = sourceSets.yamlRestTest.runtimeClasspath
+  filter {
+    includeTestsMatching 'org.elasticsearch.test.rest.VirtualThreadClientYamlTestSuiteIT'
+  }
+  mustRunAfter tasks.named('yamlRestTest')
 }
 
 tasks.register('enforceYamlTestConvention').configure {

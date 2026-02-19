@@ -9,6 +9,7 @@
 
 package org.elasticsearch.rest.action.cat;
 
+import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.admin.cluster.node.info.NodeInfo;
 import org.elasticsearch.action.admin.cluster.node.info.NodesInfoMetrics;
 import org.elasticsearch.action.admin.cluster.node.info.NodesInfoRequest;
@@ -19,6 +20,7 @@ import org.elasticsearch.action.admin.cluster.node.stats.NodesStatsRequestParame
 import org.elasticsearch.action.admin.cluster.node.stats.NodesStatsResponse;
 import org.elasticsearch.action.admin.cluster.state.ClusterStateRequest;
 import org.elasticsearch.action.admin.cluster.state.ClusterStateResponse;
+import org.elasticsearch.action.support.PlainActionFuture;
 import org.elasticsearch.action.support.RefCountingListener;
 import org.elasticsearch.client.internal.node.NodeClient;
 import org.elasticsearch.cluster.node.DiscoveryNode;
@@ -28,7 +30,9 @@ import org.elasticsearch.common.Table;
 import org.elasticsearch.common.network.NetworkAddress;
 import org.elasticsearch.common.transport.TransportAddress;
 import org.elasticsearch.common.unit.ByteSizeValue;
+import org.elasticsearch.common.util.concurrent.FutureUtils;
 import org.elasticsearch.common.util.set.Sets;
+import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.http.HttpInfo;
 import org.elasticsearch.index.bulk.stats.BulkStats;
 import org.elasticsearch.index.cache.query.QueryCacheStats;
@@ -58,9 +62,12 @@ import org.elasticsearch.rest.action.RestResponseListener;
 import org.elasticsearch.script.ScriptStats;
 import org.elasticsearch.search.suggest.completion.CompletionStats;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
 import static org.elasticsearch.rest.RestRequest.Method.GET;
 import static org.elasticsearch.rest.RestUtils.getMasterNodeTimeout;
@@ -89,8 +96,9 @@ public class RestNodesAction extends AbstractCatAction {
     public RestChannelConsumer doCatRequest(final RestRequest request, final NodeClient client) {
 
         final boolean fullId = request.paramAsBoolean("full_id", false);
+        final TimeValue timeout = getMasterNodeTimeout(request);
 
-        final ClusterStateRequest clusterStateRequest = new ClusterStateRequest(getMasterNodeTimeout(request));
+        final ClusterStateRequest clusterStateRequest = new ClusterStateRequest(timeout);
         clusterStateRequest.clear().nodes(true);
 
         final NodesInfoRequest nodesInfoRequest = new NodesInfoRequest();
@@ -116,6 +124,41 @@ public class RestNodesAction extends AbstractCatAction {
         nodesStatsRequest.indices().includeUnloadedSegments(request.paramAsBoolean("include_unloaded_segments", false));
 
         return channel -> {
+            if (Thread.currentThread().isVirtual()) {
+                final var clusterAdminClient = client.admin().cluster();
+                final var forkedRequests = new ArrayList<ForkedRequest<?>>(3);
+                try {
+                    final ForkedRequest<ClusterStateResponse> clusterStateFuture = forkedRequest(
+                        l -> clusterAdminClient.state(clusterStateRequest, l)
+                    );
+                    forkedRequests.add(clusterStateFuture);
+                    final ForkedRequest<NodesInfoResponse> nodesInfoFuture = forkedRequest(
+                        l -> clusterAdminClient.nodesInfo(nodesInfoRequest, l)
+                    );
+                    forkedRequests.add(nodesInfoFuture);
+                    final ForkedRequest<NodesStatsResponse> nodesStatsFuture = forkedRequest(
+                        l -> clusterAdminClient.nodesStats(nodesStatsRequest, l)
+                    );
+                    forkedRequests.add(nodesStatsFuture);
+
+                    final ClusterStateResponse clusterStateResponse = awaitForkedRequest(clusterStateFuture, timeout);
+                    final NodesInfoResponse nodesInfoResponse = awaitForkedRequest(nodesInfoFuture, timeout);
+                    final NodesStatsResponse nodesStatsResponse = awaitForkedRequest(nodesStatsFuture, timeout);
+
+                    channel.sendResponse(
+                        RestTable.buildResponse(
+                            buildTable(fullId, request, clusterStateResponse, nodesInfoResponse, nodesStatsResponse),
+                            channel
+                        )
+                    );
+
+                } catch (Exception e) {
+                    cancelForkedRequests(forkedRequests);
+                    channel.sendResponse(new RestResponse(channel, aggregateFailure(e, collectCompletedFailures(forkedRequests))));
+                }
+                return;
+            }
+
             final var clusterStateRef = new AtomicReference<ClusterStateResponse>();
             final var nodesInfoRef = new AtomicReference<NodesInfoResponse>();
             final var nodesStatsRef = new AtomicReference<NodesStatsResponse>();
@@ -135,6 +178,46 @@ public class RestNodesAction extends AbstractCatAction {
                 clusterAdminClient.nodesStats(nodesStatsRequest, listeners.acquire(nodesStatsRef::set));
             }
         };
+    }
+
+    private record ForkedRequest<T>(PlainActionFuture<T> future) {}
+
+    private static <T> ForkedRequest<T> forkedRequest(Consumer<ActionListener<T>> starter) {
+        return new ForkedRequest<>(PlainActionFuture.newFuture(starter));
+    }
+
+    private static <T> T awaitForkedRequest(ForkedRequest<T> request, TimeValue timeout) {
+        return request.future().actionGet(timeout);
+    }
+
+    private static Exception aggregateFailure(Exception primary, List<Exception> additional) {
+        for (Exception failure : additional) {
+            if (failure != primary && failure instanceof CancellationException == false) {
+                primary.addSuppressed(failure);
+            }
+        }
+        return primary;
+    }
+
+    private static void cancelForkedRequests(List<ForkedRequest<?>> requests) {
+        for (ForkedRequest<?> request : requests) {
+            FutureUtils.cancel(request.future());
+        }
+    }
+
+    private static List<Exception> collectCompletedFailures(List<ForkedRequest<?>> requests) {
+        final List<Exception> failures = new ArrayList<>();
+        for (ForkedRequest<?> request : requests) {
+            final PlainActionFuture<?> future = request.future();
+            if (future.isDone()) {
+                try {
+                    future.actionGet();
+                } catch (CancellationException ignored) {} catch (Exception e) {
+                    failures.add(e);
+                }
+            }
+        }
+        return failures;
     }
 
     @Override

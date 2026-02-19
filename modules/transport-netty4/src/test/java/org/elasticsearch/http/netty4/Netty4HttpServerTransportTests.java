@@ -1187,6 +1187,6 @@ public class Netty4HttpServerTransportTests extends ESTestCase {
         if (false == threadContext.isDefaultContext()) {
             throw new AssertionError("tampered thread context");
         }
-        Transports.assertTransportThread();
+        Transports.assertDefaultThreadContext(threadContext);
     }
 }

@@ -9,12 +9,15 @@ package org.elasticsearch.xpack.transform.rest.action;
 
 import org.apache.lucene.util.SetOnce;
 import org.elasticsearch.action.ActionListener;
+import org.elasticsearch.action.support.PlainActionFuture;
 import org.elasticsearch.action.support.master.AcknowledgedRequest;
 import org.elasticsearch.client.internal.Client;
 import org.elasticsearch.client.internal.node.NodeClient;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.rest.BaseRestHandler;
 import org.elasticsearch.rest.RestRequest;
+import org.elasticsearch.rest.RestResponse;
+import org.elasticsearch.rest.RestStatus;
 import org.elasticsearch.rest.Scope;
 import org.elasticsearch.rest.ServerlessScope;
 import org.elasticsearch.rest.action.RestCancellableNodeClient;
@@ -87,6 +90,36 @@ public class RestPreviewTransformAction extends BaseRestHandler {
                 PreviewTransformAction.Request previewRequest = previewRequestHolder.get();
                 client.execute(PreviewTransformAction.INSTANCE, previewRequest, listener);
             } else {
+                if (Thread.currentThread().isVirtual()) {
+                    GetTransformAction.Request getRequest = new GetTransformAction.Request(transformId);
+                    getRequest.setAllowNoResources(false);
+                    final GetTransformAction.Response getResponse = PlainActionFuture.<GetTransformAction.Response>await(
+                        l -> client.execute(GetTransformAction.INSTANCE, getRequest, l)
+                    );
+
+                    List<TransformConfig> transforms = getResponse.getResources().results();
+                    if (transforms.size() > 1) {
+                        throw ExceptionsHelper.badRequestException(
+                            "expected only one config but matched {}",
+                            transforms.stream().map(TransformConfig::getId).collect(Collectors.toList())
+                        );
+                    }
+
+                    PreviewTransformAction.Request previewRequest = new PreviewTransformAction.Request(
+                        transforms.getFirst(),
+                        timeout,
+                        previewAsIndexRequest
+                    );
+                    final PreviewTransformAction.Response response = PlainActionFuture.<PreviewTransformAction.Response>await(
+                        l -> client.execute(PreviewTransformAction.INSTANCE, previewRequest, l)
+                    );
+                    try (var builder = channel.newBuilder()) {
+                        response.toXContent(builder, channel.request());
+                        channel.sendResponse(new RestResponse(RestStatus.OK, builder));
+                    }
+                    return;
+                }
+
                 GetTransformAction.Request getRequest = new GetTransformAction.Request(transformId);
                 getRequest.setAllowNoResources(false);
                 client.execute(GetTransformAction.INSTANCE, getRequest, ActionListener.wrap(getResponse -> {

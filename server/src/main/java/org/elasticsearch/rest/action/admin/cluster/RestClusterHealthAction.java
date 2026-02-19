@@ -14,6 +14,7 @@ import org.elasticsearch.action.admin.cluster.health.ClusterHealthRequest;
 import org.elasticsearch.action.admin.cluster.health.ClusterHealthResponse;
 import org.elasticsearch.action.support.ActiveShardCount;
 import org.elasticsearch.action.support.IndicesOptions;
+import org.elasticsearch.action.support.PlainActionFuture;
 import org.elasticsearch.client.internal.node.NodeClient;
 import org.elasticsearch.cluster.health.ClusterHealthStatus;
 import org.elasticsearch.common.Priority;
@@ -21,6 +22,7 @@ import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.util.set.Sets;
 import org.elasticsearch.rest.BaseRestHandler;
 import org.elasticsearch.rest.RestRequest;
+import org.elasticsearch.rest.RestResponse;
 import org.elasticsearch.rest.RestUtils;
 import org.elasticsearch.rest.Scope;
 import org.elasticsearch.rest.ServerlessScope;
@@ -56,9 +58,26 @@ public class RestClusterHealthAction extends BaseRestHandler {
     @Override
     public RestChannelConsumer prepareRequest(final RestRequest request, final NodeClient client) throws IOException {
         final ClusterHealthRequest clusterHealthRequest = fromRequest(request);
-        return channel -> new RestCancellableNodeClient(client, request.getHttpChannel()).admin()
-            .cluster()
-            .health(clusterHealthRequest, new RestToXContentListener<>(channel, ClusterHealthResponse::status));
+        return channel -> {
+            final var cancellableClient = new RestCancellableNodeClient(client, request.getHttpChannel());
+            try {
+                if (Thread.currentThread().isVirtual()) {
+                    final ClusterHealthResponse response = PlainActionFuture.await(
+                        l -> cancellableClient.admin().cluster().health(clusterHealthRequest, l)
+                    );
+                    try (var builder = channel.newBuilder()) {
+                        response.toXContent(builder, channel.request());
+                        channel.sendResponse(new RestResponse(response.status(), builder));
+                    }
+                } else {
+                    cancellableClient.admin()
+                        .cluster()
+                        .health(clusterHealthRequest, new RestToXContentListener<>(channel, ClusterHealthResponse::status));
+                }
+            } catch (Exception e) {
+                channel.sendResponse(new RestResponse(channel, e));
+            }
+        };
     }
 
     public static ClusterHealthRequest fromRequest(final RestRequest request) {

@@ -15,6 +15,7 @@ import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.admin.indices.template.get.GetComposableIndexTemplateAction;
 import org.elasticsearch.action.admin.indices.template.get.GetIndexTemplatesRequest;
 import org.elasticsearch.action.admin.indices.template.get.GetIndexTemplatesResponse;
+import org.elasticsearch.action.support.PlainActionFuture;
 import org.elasticsearch.client.internal.node.NodeClient;
 import org.elasticsearch.cluster.metadata.ComposableIndexTemplate;
 import org.elasticsearch.cluster.metadata.IndexTemplateMetadata;
@@ -66,6 +67,29 @@ public class RestTemplatesAction extends AbstractCatAction {
         );
 
         return channel -> {
+            if (Thread.currentThread().isVirtual()) {
+                final GetIndexTemplatesResponse getIndexTemplatesResponse = PlainActionFuture.await(
+                    l -> client.admin().indices().getTemplates(getIndexTemplatesRequest, l)
+                );
+
+                GetComposableIndexTemplateAction.Response getComposableIndexTemplatesResponse;
+                try {
+                    getComposableIndexTemplatesResponse = PlainActionFuture.await(
+                        l -> client.execute(GetComposableIndexTemplateAction.INSTANCE, getComposableTemplatesRequest, l)
+                    );
+                } catch (Exception e) {
+                    if (ExceptionsHelper.unwrapCause(e) instanceof ResourceNotFoundException) {
+                        getComposableIndexTemplatesResponse = new GetComposableIndexTemplateAction.Response(Map.of());
+                    } else {
+                        throw e;
+                    }
+                }
+
+                channel.sendResponse(
+                    RestTable.buildResponse(buildTable(request, getIndexTemplatesResponse, getComposableIndexTemplatesResponse), channel)
+                );
+                return;
+            }
 
             final ListenableFuture<GetIndexTemplatesResponse> getIndexTemplatesStep = new ListenableFuture<>();
             client.admin().indices().getTemplates(getIndexTemplatesRequest, getIndexTemplatesStep);

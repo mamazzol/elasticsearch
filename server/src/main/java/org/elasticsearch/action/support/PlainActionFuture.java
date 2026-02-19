@@ -29,8 +29,27 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.locks.AbstractQueuedSynchronizer;
+import java.util.function.Consumer;
 
 public class PlainActionFuture<T> implements ActionFuture<T>, ActionListener<T> {
+
+    /**
+     * Bridge a callback-style async API (that accepts an {@link ActionListener}) into a {@link PlainActionFuture}.
+     */
+    public static <T> PlainActionFuture<T> newFuture(Consumer<ActionListener<T>> subscribe) {
+        final var future = new PlainActionFuture<T>();
+        subscribe.accept(future);
+        return future;
+    }
+
+    /**
+     * Bridge a callback-style async API (that accepts an {@link ActionListener}) into a blocking call.
+     * <p>
+     * This is intended for use in code already executing on a virtual thread.
+     */
+    public static <T> T await(Consumer<ActionListener<T>> subscribe) {
+        return newFuture(subscribe).actionGet();
+    }
 
     @Override
     public void onResponse(@Nullable T result) {

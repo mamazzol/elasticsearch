@@ -16,6 +16,7 @@ import org.elasticsearch.action.admin.indices.stats.IndicesStatsRequest;
 import org.elasticsearch.action.admin.indices.stats.IndicesStatsResponse;
 import org.elasticsearch.action.admin.indices.stats.ShardStats;
 import org.elasticsearch.action.support.IndicesOptions;
+import org.elasticsearch.action.support.PlainActionFuture;
 import org.elasticsearch.client.internal.node.NodeClient;
 import org.elasticsearch.cluster.routing.ShardRouting;
 import org.elasticsearch.cluster.routing.UnassignedInfo;
@@ -88,6 +89,23 @@ public class RestShardsAction extends AbstractCatAction {
         clusterStateRequest.clear().nodes(true).routingTable(true).indices(indices).indicesOptions(IndicesOptions.strictExpandHidden());
 
         return channel -> {
+            if (Thread.currentThread().isVirtual()) {
+                final PlainActionFuture<ClusterStateResponse> clusterStateFuture = PlainActionFuture.newFuture(
+                    l -> client.admin().cluster().state(clusterStateRequest, l)
+                );
+                final PlainActionFuture<IndicesStatsResponse> indicesStatsFuture = PlainActionFuture.newFuture(
+                    l -> client.admin()
+                        .indices()
+                        .stats(new IndicesStatsRequest().all().indices(indices).indicesOptions(IndicesOptions.strictExpandHidden()), l)
+                );
+
+                final ClusterStateResponse clusterStateResponse = clusterStateFuture.actionGet();
+                final IndicesStatsResponse indicesStatsResponse = indicesStatsFuture.actionGet();
+                final Table table = buildTable(request, clusterStateResponse, indicesStatsResponse);
+                channel.sendResponse(RestTable.buildResponse(table, channel));
+                return;
+            }
+
             final var clusterStateFuture = new ListenableFuture<ClusterStateResponse>();
             client.admin().cluster().state(clusterStateRequest, clusterStateFuture);
             client.admin()

@@ -50,8 +50,11 @@ public class Netty4HttpRequestBodyStream implements HttpBody.Stream {
 
     @Override
     public void setHandler(ChunkHandler chunkHandler) {
-        assert ctx.channel().eventLoop().inEventLoop() : Thread.currentThread().getName();
-        this.handler = chunkHandler;
+        if (ctx.channel().eventLoop().inEventLoop()) {
+            this.handler = chunkHandler;
+        } else {
+            ctx.channel().eventLoop().submit(() -> this.handler = chunkHandler).syncUninterruptibly();
+        }
     }
 
     @Override

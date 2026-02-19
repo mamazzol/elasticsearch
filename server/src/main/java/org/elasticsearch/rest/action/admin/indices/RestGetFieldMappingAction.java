@@ -13,6 +13,7 @@ import org.elasticsearch.action.admin.indices.mapping.get.GetFieldMappingsReques
 import org.elasticsearch.action.admin.indices.mapping.get.GetFieldMappingsResponse;
 import org.elasticsearch.action.admin.indices.mapping.get.GetFieldMappingsResponse.FieldMappingMetadata;
 import org.elasticsearch.action.support.IndicesOptions;
+import org.elasticsearch.action.support.PlainActionFuture;
 import org.elasticsearch.client.internal.node.NodeClient;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.rest.BaseRestHandler;
@@ -50,19 +51,33 @@ public class RestGetFieldMappingAction extends BaseRestHandler {
         GetFieldMappingsRequest getMappingsRequest = new GetFieldMappingsRequest();
         getMappingsRequest.indices(indices).fields(fields).includeDefaults(request.paramAsBoolean("include_defaults", false));
         getMappingsRequest.indicesOptions(IndicesOptions.fromRequest(request, getMappingsRequest.indicesOptions()));
-        return channel -> client.admin().indices().getFieldMappings(getMappingsRequest, new RestBuilderListener<>(channel) {
-            @Override
-            public RestResponse buildResponse(GetFieldMappingsResponse response, XContentBuilder builder) throws Exception {
+        return channel -> {
+            if (Thread.currentThread().isVirtual()) {
+                final GetFieldMappingsResponse response = PlainActionFuture.await(
+                    l -> client.admin().indices().getFieldMappings(getMappingsRequest, l)
+                );
                 Map<String, Map<String, FieldMappingMetadata>> mappingsByIndex = response.mappings();
-
-                RestStatus status = OK;
-                if (mappingsByIndex.isEmpty() && fields.length > 0) {
-                    status = NOT_FOUND;
+                RestStatus status = mappingsByIndex.isEmpty() && fields.length > 0 ? NOT_FOUND : OK;
+                try (XContentBuilder builder = channel.newBuilder()) {
+                    response.toXContent(builder, request);
+                    channel.sendResponse(new RestResponse(status, builder));
                 }
-                response.toXContent(builder, request);
-                return new RestResponse(status, builder);
+                return;
             }
-        });
+            client.admin().indices().getFieldMappings(getMappingsRequest, new RestBuilderListener<>(channel) {
+                @Override
+                public RestResponse buildResponse(GetFieldMappingsResponse response, XContentBuilder builder) throws Exception {
+                    Map<String, Map<String, FieldMappingMetadata>> mappingsByIndex = response.mappings();
+
+                    RestStatus status = OK;
+                    if (mappingsByIndex.isEmpty() && fields.length > 0) {
+                        status = NOT_FOUND;
+                    }
+                    response.toXContent(builder, request);
+                    return new RestResponse(status, builder);
+                }
+            });
+        };
     }
 
 }

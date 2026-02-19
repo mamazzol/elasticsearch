@@ -7,10 +7,13 @@
 package org.elasticsearch.xpack.ml.rest.dataframe;
 
 import org.elasticsearch.action.ActionListener;
+import org.elasticsearch.action.support.PlainActionFuture;
 import org.elasticsearch.client.internal.node.NodeClient;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.rest.BaseRestHandler;
 import org.elasticsearch.rest.RestRequest;
+import org.elasticsearch.rest.RestResponse;
+import org.elasticsearch.rest.RestStatus;
 import org.elasticsearch.rest.Scope;
 import org.elasticsearch.rest.ServerlessScope;
 import org.elasticsearch.rest.action.RestCancellableNodeClient;
@@ -74,10 +77,54 @@ public class RestExplainDataFrameAnalyticsAction extends BaseRestHandler {
             RestCancellableNodeClient cancellableClient = new RestCancellableNodeClient(client, restRequest.getHttpChannel());
 
             if (explainRequestFromBody != null) {
+                if (Thread.currentThread().isVirtual()) {
+                    try {
+                        final ExplainDataFrameAnalyticsAction.Response response = PlainActionFuture.<
+                            ExplainDataFrameAnalyticsAction.Response>await(
+                                l -> cancellableClient.execute(ExplainDataFrameAnalyticsAction.INSTANCE, explainRequestFromBody, l)
+                            );
+                        try (var builder = channel.newBuilder()) {
+                            response.toXContent(builder, channel.request());
+                            channel.sendResponse(new RestResponse(RestStatus.OK, builder));
+                        }
+                    } catch (Exception e) {
+                        listener.onFailure(e);
+                    }
+                    return;
+                }
                 cancellableClient.execute(ExplainDataFrameAnalyticsAction.INSTANCE, explainRequestFromBody, listener);
             } else {
                 GetDataFrameAnalyticsAction.Request getRequest = new GetDataFrameAnalyticsAction.Request(jobId);
                 getRequest.setAllowNoResources(false);
+                if (Thread.currentThread().isVirtual()) {
+                    try {
+                        final GetDataFrameAnalyticsAction.Response getResponse = PlainActionFuture.<
+                            GetDataFrameAnalyticsAction.Response>await(
+                                l -> cancellableClient.execute(GetDataFrameAnalyticsAction.INSTANCE, getRequest, l)
+                            );
+
+                        List<DataFrameAnalyticsConfig> jobs = getResponse.getResources().results();
+                        if (jobs.size() > 1) {
+                            throw ExceptionsHelper.badRequestException(
+                                "expected only one config but matched {}",
+                                jobs.stream().map(DataFrameAnalyticsConfig::getId).collect(Collectors.toList())
+                            );
+                        }
+
+                        ExplainDataFrameAnalyticsAction.Request explainRequest = new ExplainDataFrameAnalyticsAction.Request(jobs.get(0));
+                        final ExplainDataFrameAnalyticsAction.Response response = PlainActionFuture.<
+                            ExplainDataFrameAnalyticsAction.Response>await(
+                                l -> cancellableClient.execute(ExplainDataFrameAnalyticsAction.INSTANCE, explainRequest, l)
+                            );
+                        try (var builder = channel.newBuilder()) {
+                            response.toXContent(builder, channel.request());
+                            channel.sendResponse(new RestResponse(RestStatus.OK, builder));
+                        }
+                    } catch (Exception e) {
+                        listener.onFailure(e);
+                    }
+                    return;
+                }
                 cancellableClient.execute(GetDataFrameAnalyticsAction.INSTANCE, getRequest, ActionListener.wrap(getResponse -> {
                     List<DataFrameAnalyticsConfig> jobs = getResponse.getResources().results();
                     if (jobs.size() > 1) {

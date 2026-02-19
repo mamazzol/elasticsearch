@@ -324,7 +324,7 @@ public class AbstractHttpServerTransportTests extends ESTestCase {
      * Check that the REST controller picks up and propagates W3C trace context headers via the {@link ThreadContext}.
      * @see <a href="https://www.w3.org/TR/trace-context/">Trace Context - W3C Recommendation</a>
      */
-    public void testTraceParentAndTraceId() {
+    public void testTraceParentAndTraceId() throws Exception {
         final String traceParentValue = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
         final AtomicReference<Instant> traceStartTimeRef = new AtomicReference<>();
         final HttpServerTransport.Dispatcher dispatcher = new HttpServerTransport.Dispatcher() {
@@ -395,6 +395,7 @@ public class AbstractHttpServerTransportTests extends ESTestCase {
         ) {
             final var systemTimeBeforeRequest = System.currentTimeMillis();
             transport.dispatchRequest(fakeRequest, channel, null);
+            assertBusy(() -> assertNotNull(traceStartTimeRef.get()));
             final var systemTimeAfterRequest = System.currentTimeMillis();
             // headers are "null" here, aka not present, because the thread context changes containing them is to be confined to the request
             assertThat(threadPool.getThreadContext().getHeader(Task.TRACE_ID), nullValue());
@@ -654,7 +655,7 @@ public class AbstractHttpServerTransportTests extends ESTestCase {
                 try (var httpChannel = fakeRestRequestExcludedPath.getHttpChannel()) {
                     transport.incomingRequest(fakeRestRequestExcludedPath.getHttpRequest(), httpChannel);
                 }
-                mockLog.assertAllExpectationsMatched();
+                assertBusy(mockLog::assertAllExpectationsMatched);
             }
         }
     }
@@ -726,7 +727,7 @@ public class AbstractHttpServerTransportTests extends ESTestCase {
                 .build();
             transport.serverAcceptedChannel(fakeRestRequest.getHttpChannel());
             transport.incomingRequest(fakeRestRequest.getHttpRequest(), fakeRestRequest.getHttpChannel());
-            mockLog.assertAllExpectationsMatched();
+            assertBusy(mockLog::assertAllExpectationsMatched);
         }
     }
 
@@ -943,7 +944,7 @@ public class AbstractHttpServerTransportTests extends ESTestCase {
         }
     }
 
-    public void testStopWorksWithNoOpenRequests() {
+    public void testStopWorksWithNoOpenRequests() throws Exception {
         var grace = SHORT_GRACE_PERIOD_MS;
         try (var noWait = LogExpectation.unexpectedTimeout(grace); var transport = new TestHttpServerTransport(gracePeriod(grace))) {
             final TestHttpRequest httpRequest = new TestHttpRequest(
@@ -955,7 +956,8 @@ public class AbstractHttpServerTransportTests extends ESTestCase {
             TestHttpChannel httpChannel = new TestHttpChannel();
             transport.serverAcceptedChannel(httpChannel);
             transport.incomingRequest(httpRequest, httpChannel);
-            assertFalse(httpChannel.isOpen());
+            httpChannel.getResponse();
+            assertBusy(() -> assertFalse(httpChannel.isOpen()));
 
             // TestHttpChannel will throw if closed twice, so this ensures close is not called.
             transport.doStop();
@@ -976,6 +978,7 @@ public class AbstractHttpServerTransportTests extends ESTestCase {
             transport.serverAcceptedChannel(httpChannel);
 
             transport.incomingRequest(testHttpRequest(), httpChannel);
+            httpChannel.getResponse();
             // channel now idle
 
             assertTrue(httpChannel.isOpen());
@@ -1082,6 +1085,9 @@ public class AbstractHttpServerTransportTests extends ESTestCase {
 
             transport.serverAcceptedChannel(httpChannel);
             transport.incomingRequest(testHttpRequest(), httpChannel);
+            // With virtual-thread dispatch enabled this request may complete asynchronously, so wait until its response is enqueued before
+            // blocking subsequent responses.
+            final HttpResponse first = httpChannel.getResponse();
 
             CountDownLatch stopped = new CountDownLatch(1);
 
@@ -1109,7 +1115,6 @@ public class AbstractHttpServerTransportTests extends ESTestCase {
             assertFalse(transport.testHttpServerChannel.isOpen());
             assertFalse(httpChannel.isOpen());
 
-            HttpResponse first = httpChannel.getResponse();
             assertTrue(httpChannel.noResponses()); // never sent the second response
             assertThat(first, instanceOf(TestHttpResponse.class));
 
@@ -1294,8 +1299,8 @@ public class AbstractHttpServerTransportTests extends ESTestCase {
                     fail("interrupted");
                 }
             }
-            responses.add(response);
             listener.onResponse(null);
+            responses.add(response);
         }
 
         public void setLocalAddress(InetSocketAddress localAddress) {

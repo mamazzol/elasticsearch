@@ -19,6 +19,7 @@ import org.elasticsearch.action.admin.cluster.node.stats.NodesStatsRequestParame
 import org.elasticsearch.action.admin.cluster.node.stats.NodesStatsResponse;
 import org.elasticsearch.action.admin.cluster.state.ClusterStateRequest;
 import org.elasticsearch.action.admin.cluster.state.ClusterStateResponse;
+import org.elasticsearch.action.support.PlainActionFuture;
 import org.elasticsearch.client.internal.node.NodeClient;
 import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.cluster.node.DiscoveryNodes;
@@ -76,31 +77,62 @@ public class RestThreadPoolAction extends AbstractCatAction {
         clusterStateRequest.clear().nodes(true);
         RestUtils.consumeDeprecatedLocalParameter(request);
 
-        return channel -> client.admin().cluster().state(clusterStateRequest, new RestActionListener<ClusterStateResponse>(channel) {
-            @Override
-            public void processResponse(final ClusterStateResponse clusterStateResponse) {
-                NodesInfoRequest nodesInfoRequest = new NodesInfoRequest();
+        return channel -> {
+            if (Thread.currentThread().isVirtual()) {
+                final NodesInfoRequest nodesInfoRequest = new NodesInfoRequest();
                 nodesInfoRequest.clear()
                     .addMetrics(NodesInfoMetrics.Metric.PROCESS.metricName(), NodesInfoMetrics.Metric.THREAD_POOL.metricName());
-                client.admin().cluster().nodesInfo(nodesInfoRequest, new RestActionListener<NodesInfoResponse>(channel) {
-                    @Override
-                    public void processResponse(final NodesInfoResponse nodesInfoResponse) {
-                        NodesStatsRequest nodesStatsRequest = new NodesStatsRequest();
-                        nodesStatsRequest.setIncludeShardsStats(false);
-                        nodesStatsRequest.clear().addMetric(NodesStatsRequestParameters.Metric.THREAD_POOL);
-                        client.admin().cluster().nodesStats(nodesStatsRequest, new RestResponseListener<NodesStatsResponse>(channel) {
-                            @Override
-                            public RestResponse buildResponse(NodesStatsResponse nodesStatsResponse) throws Exception {
-                                return RestTable.buildResponse(
-                                    buildTable(request, clusterStateResponse, nodesInfoResponse, nodesStatsResponse),
-                                    channel
-                                );
-                            }
-                        });
-                    }
-                });
+
+                final NodesStatsRequest nodesStatsRequest = new NodesStatsRequest();
+                nodesStatsRequest.setIncludeShardsStats(false);
+                nodesStatsRequest.clear().addMetric(NodesStatsRequestParameters.Metric.THREAD_POOL);
+
+                final var clusterAdminClient = client.admin().cluster();
+                final PlainActionFuture<ClusterStateResponse> clusterStateFuture = PlainActionFuture.newFuture(
+                    l -> clusterAdminClient.state(clusterStateRequest, l)
+                );
+                final PlainActionFuture<NodesInfoResponse> nodesInfoFuture = PlainActionFuture.newFuture(
+                    l -> clusterAdminClient.nodesInfo(nodesInfoRequest, l)
+                );
+                final PlainActionFuture<NodesStatsResponse> nodesStatsFuture = PlainActionFuture.newFuture(
+                    l -> clusterAdminClient.nodesStats(nodesStatsRequest, l)
+                );
+
+                final ClusterStateResponse clusterStateResponse = clusterStateFuture.actionGet();
+                final NodesInfoResponse nodesInfoResponse = nodesInfoFuture.actionGet();
+                final NodesStatsResponse nodesStatsResponse = nodesStatsFuture.actionGet();
+                channel.sendResponse(
+                    RestTable.buildResponse(buildTable(request, clusterStateResponse, nodesInfoResponse, nodesStatsResponse), channel)
+                );
+                return;
             }
-        });
+
+            client.admin().cluster().state(clusterStateRequest, new RestActionListener<ClusterStateResponse>(channel) {
+                @Override
+                public void processResponse(final ClusterStateResponse clusterStateResponse) {
+                    NodesInfoRequest nodesInfoRequest = new NodesInfoRequest();
+                    nodesInfoRequest.clear()
+                        .addMetrics(NodesInfoMetrics.Metric.PROCESS.metricName(), NodesInfoMetrics.Metric.THREAD_POOL.metricName());
+                    client.admin().cluster().nodesInfo(nodesInfoRequest, new RestActionListener<NodesInfoResponse>(channel) {
+                        @Override
+                        public void processResponse(final NodesInfoResponse nodesInfoResponse) {
+                            NodesStatsRequest nodesStatsRequest = new NodesStatsRequest();
+                            nodesStatsRequest.setIncludeShardsStats(false);
+                            nodesStatsRequest.clear().addMetric(NodesStatsRequestParameters.Metric.THREAD_POOL);
+                            client.admin().cluster().nodesStats(nodesStatsRequest, new RestResponseListener<NodesStatsResponse>(channel) {
+                                @Override
+                                public RestResponse buildResponse(NodesStatsResponse nodesStatsResponse) throws Exception {
+                                    return RestTable.buildResponse(
+                                        buildTable(request, clusterStateResponse, nodesInfoResponse, nodesStatsResponse),
+                                        channel
+                                    );
+                                }
+                            });
+                        }
+                    });
+                }
+            });
+        };
     }
 
     @Override

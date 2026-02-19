@@ -16,6 +16,7 @@ import org.elasticsearch.action.admin.cluster.node.stats.NodesStatsResponse;
 import org.elasticsearch.action.admin.cluster.state.ClusterStateRequest;
 import org.elasticsearch.action.admin.cluster.state.ClusterStateResponse;
 import org.elasticsearch.action.admin.indices.stats.CommonStatsFlags;
+import org.elasticsearch.action.support.PlainActionFuture;
 import org.elasticsearch.client.internal.node.NodeClient;
 import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.cluster.routing.ShardRouting;
@@ -65,25 +66,49 @@ public class RestAllocationAction extends AbstractCatAction {
         clusterStateRequest.clear().routingTable(true);
         RestUtils.consumeDeprecatedLocalParameter(request);
 
-        return channel -> client.admin().cluster().state(clusterStateRequest, new RestActionListener<ClusterStateResponse>(channel) {
-            @Override
-            public void processResponse(final ClusterStateResponse state) {
-                NodesStatsRequest statsRequest = new NodesStatsRequest(nodes);
+        return channel -> {
+            if (Thread.currentThread().isVirtual()) {
+                final NodesStatsRequest statsRequest = new NodesStatsRequest(nodes);
                 statsRequest.setIncludeShardsStats(false);
                 statsRequest.clear()
                     .addMetric(NodesStatsRequestParameters.Metric.FS)
                     .addMetric(NodesStatsRequestParameters.Metric.ALLOCATIONS)
                     .indices(new CommonStatsFlags(CommonStatsFlags.Flag.Store));
 
-                client.admin().cluster().nodesStats(statsRequest, new RestResponseListener<>(channel) {
-                    @Override
-                    public RestResponse buildResponse(NodesStatsResponse stats) throws Exception {
-                        Table tab = buildTable(request, state, stats);
-                        return RestTable.buildResponse(tab, channel);
-                    }
-                });
+                final var clusterAdminClient = client.admin().cluster();
+                final PlainActionFuture<ClusterStateResponse> clusterStateFuture = PlainActionFuture.newFuture(
+                    l -> clusterAdminClient.state(clusterStateRequest, l)
+                );
+                final PlainActionFuture<NodesStatsResponse> nodesStatsFuture = PlainActionFuture.newFuture(
+                    l -> clusterAdminClient.nodesStats(statsRequest, l)
+                );
+
+                final ClusterStateResponse state = clusterStateFuture.actionGet();
+                final NodesStatsResponse stats = nodesStatsFuture.actionGet();
+                channel.sendResponse(RestTable.buildResponse(buildTable(request, state, stats), channel));
+                return;
             }
-        });
+
+            client.admin().cluster().state(clusterStateRequest, new RestActionListener<ClusterStateResponse>(channel) {
+                @Override
+                public void processResponse(final ClusterStateResponse state) {
+                    NodesStatsRequest statsRequest = new NodesStatsRequest(nodes);
+                    statsRequest.setIncludeShardsStats(false);
+                    statsRequest.clear()
+                        .addMetric(NodesStatsRequestParameters.Metric.FS)
+                        .addMetric(NodesStatsRequestParameters.Metric.ALLOCATIONS)
+                        .indices(new CommonStatsFlags(CommonStatsFlags.Flag.Store));
+
+                    client.admin().cluster().nodesStats(statsRequest, new RestResponseListener<>(channel) {
+                        @Override
+                        public RestResponse buildResponse(NodesStatsResponse stats) throws Exception {
+                            Table tab = buildTable(request, state, stats);
+                            return RestTable.buildResponse(tab, channel);
+                        }
+                    });
+                }
+            });
+        };
 
     }
 

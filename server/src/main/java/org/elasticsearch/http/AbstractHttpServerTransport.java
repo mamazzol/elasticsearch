@@ -36,6 +36,7 @@ import org.elasticsearch.common.util.concurrent.RunOnce;
 import org.elasticsearch.common.util.concurrent.ThreadContext;
 import org.elasticsearch.common.xcontent.LoggingDeprecationHandler;
 import org.elasticsearch.core.AbstractRefCounted;
+import org.elasticsearch.core.Booleans;
 import org.elasticsearch.core.RefCounted;
 import org.elasticsearch.rest.RestChannel;
 import org.elasticsearch.rest.RestRequest;
@@ -78,6 +79,10 @@ import static org.elasticsearch.http.HttpTransportSettings.SETTING_HTTP_SERVER_S
 
 public abstract class AbstractHttpServerTransport extends AbstractLifecycleComponent implements HttpServerTransport {
     private static final Logger logger = LogManager.getLogger(AbstractHttpServerTransport.class);
+
+    private static final boolean HTTP_REST_VIRTUAL_THREADS_ENABLED = Booleans.parseBoolean(
+        System.getProperty("es.http.rest.virtual_threads", "false")
+    );
 
     protected final Settings settings;
     public final HttpHandlingSettings handlingSettings;
@@ -518,6 +523,14 @@ public abstract class AbstractHttpServerTransport extends AbstractLifecycleCompo
 
     // Visible for testing
     void dispatchRequest(final RestRequest restRequest, final RestChannel channel, final Throwable badRequestCause) {
+        if (HTTP_REST_VIRTUAL_THREADS_ENABLED) {
+            Thread.ofVirtual().name("es-rest-", 0).start(() -> dispatchRequestOnCurrentThread(restRequest, channel, badRequestCause));
+            return;
+        }
+        dispatchRequestOnCurrentThread(restRequest, channel, badRequestCause);
+    }
+
+    private void dispatchRequestOnCurrentThread(final RestRequest restRequest, final RestChannel channel, final Throwable badRequestCause) {
         final ThreadContext threadContext = threadPool.getThreadContext();
         try (ThreadContext.StoredContext ignore = threadContext.stashContext()) {
             if (badRequestCause != null) {
