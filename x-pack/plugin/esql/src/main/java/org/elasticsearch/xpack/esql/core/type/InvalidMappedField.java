@@ -7,13 +7,9 @@
 
 package org.elasticsearch.xpack.esql.core.type;
 
-import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.xpack.esql.core.QlIllegalArgumentException;
-import org.elasticsearch.xpack.esql.io.stream.PlanStreamInput;
-import org.elasticsearch.xpack.esql.io.stream.PlanStreamOutput;
 
-import java.io.IOException;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -21,84 +17,80 @@ import java.util.TreeMap;
 import java.util.stream.Collectors;
 
 /**
- * Representation of field mapped differently across indices.
- * Used during mapping discovery only.
- * Note that the field <code>typesToIndices</code> is not serialized because that information is
- * not required through the cluster, only surviving as long as the Analyser phase of query planning.
- * It is used specifically for the 'union types' feature in ES|QL.
+ * Representation of a field mapped differently across indices. When {@code SET unmapped_fields="LOAD"} this also includes indices missing
+ * the field in their mappings, in which case it is treated as {@link DataType#KEYWORD}.
+ * <p>
+ * Used during analysis only; the analyzer's {@code UnionTypesCleanup} converts any {@link InvalidMappedField}s before the plan leaves
+ * the coordinator.
  */
 public class InvalidMappedField extends EsField {
 
-    private final String errorMessage;
     private final Map<String, Set<String>> typesToIndices;
+    private final boolean isPotentiallyUnmapped;
+    /**
+     * Lazily derived from {@link #typesToIndices} and {@link #isPotentiallyUnmapped} on first access; not part of
+     * {@link #equals(Object)} / {@link #hashCode()}.
+     */
+    private String cachedErrorMessage;
 
-    public InvalidMappedField(String name, String errorMessage, Map<String, EsField> properties) {
-        this(name, errorMessage, properties, Map.of(), TimeSeriesFieldType.UNKNOWN);
+    public InvalidMappedField(String name, Map<String, Set<String>> typesToIndices) {
+        // Use a mutable map: IndexResolver may add child fields into the properties of a conflicting parent field later.
+        this(name, new TreeMap<>(), typesToIndices, false, TimeSeriesFieldType.UNKNOWN);
     }
 
-    public InvalidMappedField(String name, String errorMessage) {
-        this(name, errorMessage, new TreeMap<>());
+    public InvalidMappedField(String name, Map<String, Set<String>> typesToIndices, Map<String, EsField> properties) {
+        this(name, properties, typesToIndices, false, TimeSeriesFieldType.UNKNOWN);
     }
 
     /**
-     * Constructor supporting union types, used in ES|QL.
+     * An {@link InvalidMappedField} is potentially unmapped if at least one index does not contain a mapping for the field, and the user
+     * requested we load the values from {@code _source}. In that case, there is (possibly) an additional type conflict since we treat
+     * unmapped fields as {@link DataType#KEYWORD}.
      */
-    public InvalidMappedField(String name, Map<String, Set<String>> typesToIndices) {
-        this(name, makeErrorMessage(typesToIndices, false), new TreeMap<>(), typesToIndices, TimeSeriesFieldType.UNKNOWN);
+    public static InvalidMappedField potentiallyUnmapped(String name, Map<String, Set<String>> typesToIndices) {
+        // Use a mutable map: IndexResolver may add child fields into the properties of a conflicting parent field later.
+        return new InvalidMappedField(name, new TreeMap<>(), typesToIndices, true, TimeSeriesFieldType.UNKNOWN);
     }
 
     private InvalidMappedField(
         String name,
-        String errorMessage,
         Map<String, EsField> properties,
         Map<String, Set<String>> typesToIndices,
+        boolean isPotentiallyUnmapped,
         TimeSeriesFieldType type
     ) {
         super(name, DataType.UNSUPPORTED, properties, false, type);
-        this.errorMessage = errorMessage;
         this.typesToIndices = typesToIndices;
+        this.isPotentiallyUnmapped = isPotentiallyUnmapped;
+        this.cachedErrorMessage = null;
     }
 
-    protected InvalidMappedField(StreamInput in) throws IOException {
-        this(
-            ((PlanStreamInput) in).readCachedString(),
-            in.readString(),
-            in.readImmutableMap(StreamInput::readString, EsField::readFrom),
-            Map.of(),
-            readTimeSeriesFieldType(in)
-        );
+    @Override
+    public void writeContent(StreamOutput out) {
+        throw new UnsupportedOperationException("InvalidMappedField must never leave the coordinator");
     }
 
     public Set<DataType> types() {
         return typesToIndices.keySet().stream().map(DataType::fromTypeName).collect(Collectors.toSet());
     }
 
-    @Override
-    public void writeContent(StreamOutput out) throws IOException {
-        ((PlanStreamOutput) out).writeCachedString(getName());
-        out.writeString(errorMessage);
-        out.writeMap(getProperties(), (o, x) -> x.writeTo(out));
-        writeTimeSeriesFieldType(out);
-    }
-
-    public String getWriteableName() {
-        return "InvalidMappedField";
-    }
-
     public String errorMessage() {
-        return errorMessage;
+        if (cachedErrorMessage == null) {
+            cachedErrorMessage = makeErrorMessage(typesToIndices, isPotentiallyUnmapped);
+        }
+        return cachedErrorMessage;
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(super.hashCode(), errorMessage);
+        return Objects.hash(super.hashCode(), typesToIndices, isPotentiallyUnmapped);
     }
 
     @Override
     public boolean equals(Object obj) {
         if (super.equals(obj)) {
             InvalidMappedField other = (InvalidMappedField) obj;
-            return Objects.equals(errorMessage, other.errorMessage);
+            return isPotentiallyUnmapped == other.isPotentiallyUnmapped && Objects.equals(typesToIndices, other.typesToIndices);
         }
 
         return false;
@@ -119,8 +111,8 @@ public class InvalidMappedField extends EsField {
         return typesToIndices;
     }
 
-    public static String makeErrorsMessageIncludingInsistKeyword(Map<String, Set<String>> typesToIndices) {
-        return makeErrorMessage(typesToIndices, true);
+    public boolean isPotentiallyUnmapped() {
+        return isPotentiallyUnmapped;
     }
 
     private static String makeErrorMessage(Map<String, Set<String>> typesToIndices, boolean includeInsistKeyword) {
@@ -132,7 +124,7 @@ public class InvalidMappedField extends EsField {
         boolean first = true;
         if (isInsistKeywordOnlyKeyword) {
             first = false;
-            errorMessage.append("[keyword] enforced by INSIST command");
+            errorMessage.append("[keyword] due to loading from _source");
         }
         for (Map.Entry<String, Set<String>> e : typesToIndices.entrySet()) {
             if (first) {
@@ -144,7 +136,7 @@ public class InvalidMappedField extends EsField {
             errorMessage.append(e.getKey());
             errorMessage.append("] ");
             if (e.getKey().equals(DataType.KEYWORD.typeName()) && includeInsistKeyword) {
-                errorMessage.append("enforced by INSIST command and in ");
+                errorMessage.append("due to loading from _source and in ");
             } else {
                 errorMessage.append("in ");
             }

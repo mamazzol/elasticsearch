@@ -8,7 +8,6 @@
 package org.elasticsearch.xpack.esql;
 
 import org.elasticsearch.test.ESTestCase;
-import org.elasticsearch.xpack.esql.action.PromqlFeatures;
 
 import java.util.Set;
 
@@ -17,7 +16,6 @@ import static org.hamcrest.Matchers.equalTo;
 public class EsqlTestUtilsTests extends ESTestCase {
 
     public void testPromQL() {
-        assumeTrue("requires snapshot build with promql feature enabled", PromqlFeatures.isEnabled());
         assertThat(
             EsqlTestUtils.addRemoteIndices("PROMQL index=foo,bar step=1m (avg(foo_bar))", Set.of(), false),
             equalTo("PROMQL index=*:foo,foo,*:bar,bar step=1m (avg(foo_bar))")
@@ -41,10 +39,9 @@ public class EsqlTestUtilsTests extends ESTestCase {
     }
 
     public void testPromQLDefaultIndex() {
-        assumeTrue("requires snapshot build with promql feature enabled", PromqlFeatures.isEnabled());
         assertThat(
             EsqlTestUtils.addRemoteIndices("PROMQL step=1m (avg(baz))", Set.of(), false),
-            equalTo("PROMQL index=*:*,* step=1m (avg(baz))")
+            equalTo("PROMQL index=*:metrics-*,metrics-* step=1m (avg(baz))")
         );
     }
 
@@ -150,5 +147,32 @@ public class EsqlTestUtilsTests extends ESTestCase {
             EsqlTestUtils.addRemoteIndices("FROM sample_data_ts_nanos, sample_data", Set.of(), false),
             equalTo("FROM *:sample_data_ts_nanos,sample_data_ts_nanos, *:sample_data,sample_data")
         );
+    }
+
+    public void testConvertSubqueryToRemoteIndicesRowSubqueryBodyUnchanged() {
+        String in = """
+            FROM (ROW emp_no = 99999, languages = 99)
+            | KEEP emp_no, languages""";
+        String out = "FROM (ROW emp_no = 99999, languages = 99) | KEEP emp_no, languages";
+        assertThat(EsqlTestUtils.convertSubqueryToRemoteIndices(in), equalTo(out));
+    }
+
+    public void testConvertSubqueryToRemoteIndicesRowSubqueryWithIndexPattern() {
+        String in = """
+            FROM employees, (ROW emp_no = 99999)
+            | KEEP emp_no""";
+        String out = "FROM *:employees,employees, (ROW emp_no = 99999) | KEEP emp_no";
+        assertThat(EsqlTestUtils.convertSubqueryToRemoteIndices(in), equalTo(out));
+    }
+
+    public void testConvertSubqueryToRemoteIndicesMultipleRowSubqueries() {
+        String in = """
+            FROM
+                (ROW emp_no = 1, languages = 5),
+                (ROW emp_no = 2, languages = 10)
+            | SORT emp_no
+            | KEEP emp_no, languages""";
+        String out = "FROM (ROW emp_no = 1, languages = 5), (ROW emp_no = 2, languages = 10) | SORT emp_no | KEEP emp_no, languages";
+        assertThat(EsqlTestUtils.convertSubqueryToRemoteIndices(in), equalTo(out));
     }
 }

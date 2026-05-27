@@ -53,6 +53,7 @@ public class DefaultMappingParametersHandler implements DataSourceHandler {
             case WILDCARD -> wildcardMapping();
             case MATCH_ONLY_TEXT -> matchOnlyTextMapping();
             case PASSTHROUGH -> throw new IllegalArgumentException("Unsupported field type: " + fieldType);
+            case FLATTENED -> flattenedFieldMapping();
         });
     }
 
@@ -84,13 +85,7 @@ public class DefaultMappingParametersHandler implements DataSourceHandler {
 
     private Supplier<Map<String, Object>> keywordMapping(DataSourceRequest.LeafMappingParametersGenerator request) {
         return () -> {
-            var mapping = new HashMap<String, Object>();
-            mapping.put("store", ESTestCase.randomBoolean());
-            mapping.put("index", ESTestCase.randomBoolean());
-
-            if (ESTestCase.randomBoolean()) {
-                mapping.put(Mapper.SYNTHETIC_SOURCE_KEEP_PARAM, randomFrom("none", "arrays", "all"));
-            }
+            var mapping = commonMappingParameters();
 
             mapping.put("doc_values", extendedDocValuesParams());
 
@@ -224,6 +219,8 @@ public class DefaultMappingParametersHandler implements DataSourceHandler {
         return () -> {
             var mapping = commonMappingParameters();
 
+            mapping.put("doc_values", extendedDocValuesParams());
+
             if (ESTestCase.randomDouble() <= 0.2) {
                 mapping.put("null_value", NetworkAddress.format(ESTestCase.randomIp(ESTestCase.randomBoolean())));
             }
@@ -278,6 +275,40 @@ public class DefaultMappingParametersHandler implements DataSourceHandler {
         }
 
         return map;
+    }
+
+    private Supplier<Map<String, Object>> flattenedFieldMapping() {
+        return () -> {
+            var mapping = new HashMap<String, Object>();
+            mapping.put("index", ESTestCase.randomBoolean());
+            mapping.put("doc_values", ESTestCase.randomBoolean());
+
+            if (ESTestCase.randomDouble() <= 0.2) {
+                mapping.put("null_value", ESTestCase.randomAlphaOfLengthBetween(0, 10));
+            }
+
+            if (ESTestCase.randomDouble() < 0.2) {
+                mapping.put("eager_global_ordinals", ESTestCase.randomBoolean());
+            }
+
+            if (ESTestCase.randomDouble() <= 0.2) {
+                mapping.put("ignore_above", ESTestCase.randomIntBetween(1, 50));
+            }
+
+            if (ESTestCase.randomDouble() < 0.2) {
+                mapping.put("index_options", ESTestCase.randomFrom("docs", "freqs"));
+            }
+
+            if (ESTestCase.randomDouble() < 0.2) {
+                mapping.put("split_queries_on_whitespace", ESTestCase.randomBoolean());
+            }
+
+            if (ESTestCase.randomDouble() < 0.2) {
+                mapping.put("preserve_leaf_arrays", ESTestCase.randomFrom("lossy", "exact"));
+            }
+
+            return mapping;
+        };
     }
 
     protected Object extendedDocValuesParams() {

@@ -7,6 +7,7 @@
 
 package org.elasticsearch.xpack.stateless.commits;
 
+import org.elasticsearch.core.Nullable;
 import org.elasticsearch.xpack.stateless.engine.PrimaryTermAndGeneration;
 
 import java.util.Collections;
@@ -154,6 +155,10 @@ public class BlobFileRanges {
         return blobFileRanges;
     }
 
+    public boolean hasReplicatedRanges() {
+        return replicatedRanges.isEmpty() == false;
+    }
+
     private static boolean assertNoOverlappingReplicatedRanges(TreeMap<Long, ReplicatedByteRange> ranges) {
         ReplicatedByteRange previous = null;
         for (var range : ranges.entrySet()) {
@@ -163,8 +168,24 @@ public class BlobFileRanges {
         return true;
     }
 
+    @Override
+    public boolean equals(Object o) {
+        if (o == null || getClass() != o.getClass()) return false;
+        BlobFileRanges that = (BlobFileRanges) o;
+        return Objects.equals(blobLocation, that.blobLocation) && Objects.equals(replicatedRanges, that.replicatedRanges);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(blobLocation, replicatedRanges);
+    }
+
     public String toString() {
         return blobLocation.toString();
     }
 
+    // for tests only
+    public @Nullable Long locationOfFirstReplicatedContents() {
+        return replicatedRanges.isEmpty() ? null : replicatedRanges.firstEntry().getValue().copy;
+    }
 }

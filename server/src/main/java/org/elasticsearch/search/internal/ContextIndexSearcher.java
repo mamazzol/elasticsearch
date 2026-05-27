@@ -13,7 +13,6 @@ import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.Term;
-import org.apache.lucene.search.BooleanClause;
 import org.apache.lucene.search.BulkScorer;
 import org.apache.lucene.search.CollectionStatistics;
 import org.apache.lucene.search.CollectionTerminatedException;
@@ -28,14 +27,12 @@ import org.apache.lucene.search.MatchNoDocsQuery;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.QueryCache;
 import org.apache.lucene.search.QueryCachingPolicy;
-import org.apache.lucene.search.QueryVisitor;
 import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.Scorer;
 import org.apache.lucene.search.TermStatistics;
 import org.apache.lucene.search.Weight;
 import org.apache.lucene.search.similarities.Similarity;
 import org.apache.lucene.util.Bits;
-import org.apache.lucene.util.automaton.ByteRunAutomaton;
 import org.elasticsearch.common.lucene.search.BitsIterator;
 import org.elasticsearch.core.Releasable;
 import org.elasticsearch.search.dfs.AggregatedDfs;
@@ -54,7 +51,6 @@ import java.util.Objects;
 import java.util.PriorityQueue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Executor;
-import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 /**
@@ -170,6 +166,15 @@ public class ContextIndexSearcher extends IndexSearcher implements Releasable {
      */
     public void addQueryCancellation(Runnable action) {
         this.cancellable.add(action);
+    }
+
+    /**
+     * Runs all registered cancellation/timeout checks; throws when one fires (e.g.
+     * {@link TimeExceededException}, {@link org.elasticsearch.tasks.TaskCancelledException}).
+     * No-op if none registered.
+     */
+    public void checkCancelled() {
+        this.cancellable.checkCancelled();
     }
 
     /**
@@ -562,7 +567,7 @@ public class ContextIndexSearcher extends IndexSearcher implements Releasable {
         if (termStatistics == null) {
             return totalTermFreq;
         }
-        return termStatistics.docFreq();
+        return termStatistics.totalTermFreq();
     }
 
     private TermStatistics termStatisticsFromDfs(Term term) {
@@ -616,42 +621,7 @@ public class ContextIndexSearcher extends IndexSearcher implements Releasable {
      * {@link TooManyNestedClauses} if the limit is exceeded.
      */
     private static void verifyQueryLimit(Query query) {
-        final int[] numClauses = new int[1];
         final int maxClauseCount = getMaxClauseCount();
-        query.visit(new QueryVisitor() {
-            @Override
-            public QueryVisitor getSubVisitor(BooleanClause.Occur occur, Query parent) {
-                // Return this instance even for MUST_NOT and not an empty QueryVisitor
-                return this;
-            }
-
-            @Override
-            public void visitLeaf(Query query) {
-                if (numClauses[0] > maxClauseCount) {
-                    throw new TooManyNestedClauses();
-                }
-                ++numClauses[0];
-            }
-
-            @Override
-            public void consumeTerms(Query query, Term... terms) {
-                if (numClauses[0] > maxClauseCount) {
-                    throw new TooManyNestedClauses();
-                }
-                numClauses[0] += terms.length;
-            }
-
-            @Override
-            public void consumeTermsMatching(Query query, String field, Supplier<ByteRunAutomaton> automaton) {
-                if (numClauses[0] > maxClauseCount) {
-                    throw new TooManyNestedClauses();
-                }
-                ++numClauses[0];
-            }
-        });
-
-        if (numClauses[0] > maxClauseCount) {
-            throw new TooManyNestedClauses();
-        }
+        query.visit(new MaxClauseCountQueryVisitor(maxClauseCount));
     }
 }

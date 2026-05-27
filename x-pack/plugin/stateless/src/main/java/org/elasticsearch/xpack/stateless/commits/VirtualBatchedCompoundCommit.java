@@ -17,7 +17,7 @@ import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.ResourceNotFoundException;
 import org.elasticsearch.blobcache.BlobCacheUtils;
 import org.elasticsearch.blobcache.shared.SharedBytes;
-import org.elasticsearch.common.io.stream.PositionTrackingOutputStreamStreamOutput;
+import org.elasticsearch.common.io.stream.OutputStreamStreamOutput;
 import org.elasticsearch.common.lucene.store.InputStreamIndexInput;
 import org.elasticsearch.common.util.Maps;
 import org.elasticsearch.common.util.concurrent.ConcurrentCollections;
@@ -788,13 +788,11 @@ public class VirtualBatchedCompoundCommit extends AbstractRefCounted implements 
         return List.copyOf(pendingCompoundCommits);
     }
 
-    // TODO: make package-private ES-13786
-    public int size() {
+    int size() {
         return pendingCompoundCommits.size();
     }
 
-    // TODO: make package-private ES-13786
-    public Set<PrimaryTermAndGeneration> getPendingCompoundCommitGenerations() {
+    Set<PrimaryTermAndGeneration> getPendingCompoundCommitGenerations() {
         return pendingCompoundCommits.stream()
             .map(PendingCompoundCommit::getStatelessCompoundCommit)
             .map(StatelessCompoundCommit::primaryTermAndGeneration)
@@ -817,7 +815,6 @@ public class VirtualBatchedCompoundCommit extends AbstractRefCounted implements 
     ) throws IOException {
         assert getBlobName() != null;
         try (ByteArrayOutputStream os = new ByteArrayOutputStream()) {
-            var positionTrackingOutputStreamStreamOutput = new PositionTrackingOutputStreamStreamOutput(os);
             StatelessCompoundCommit.writeXContentHeader(
                 shardId,
                 reference.getGeneration(),
@@ -828,7 +825,7 @@ public class VirtualBatchedCompoundCommit extends AbstractRefCounted implements 
                 referencedFiles,
                 internalFiles,
                 replicatedRanges,
-                positionTrackingOutputStreamStreamOutput,
+                new OutputStreamStreamOutput(os),
                 useInternalFilesReplicatedContent,
                 extraContent
             );
@@ -836,8 +833,7 @@ public class VirtualBatchedCompoundCommit extends AbstractRefCounted implements 
         }
     }
 
-    // TODO: make package-private ES-13786
-    public BlobLocation getBlobLocation(String fileName) {
+    BlobLocation getBlobLocation(String fileName) {
         var internalLocation = internalLocations.get(fileName);
         return internalLocation == null ? uploadedBlobLocationsSupplier.apply(fileName) : internalLocation;
     }
@@ -892,8 +888,7 @@ public class VirtualBatchedCompoundCommit extends AbstractRefCounted implements 
         }
     }
 
-    // TODO: make package-private ES-13786
-    public boolean assertSameNodeEphemeralId(String id) {
+    boolean assertSameNodeEphemeralId(String id) {
         assert id.equals(nodeEphemeralId) : id + " != " + nodeEphemeralId;
         return true;
     }
@@ -982,13 +977,11 @@ public class VirtualBatchedCompoundCommit extends AbstractRefCounted implements 
             return reference.getGeneration();
         }
 
-        // TODO: make package-private ES-13786
-        public long getMaxSeqNo() {
+        long getMaxSeqNo() {
             return maxSeqNo;
         }
 
-        // TODO: make package-private ES-13786
-        public StatelessCommitRef getCommitReference() {
+        StatelessCommitRef getCommitReference() {
             return reference;
         }
 

@@ -567,11 +567,30 @@ public class RestController implements HttpServerTransport.Dispatcher {
             final String lowerKey = key.toLowerCase(Locale.ROOT).replace('-', '_');
             attributes.put("http.request.headers." + lowerKey, values == null ? "" : String.join("; ", values));
         });
-        attributes.put("http.method", Objects.requireNonNullElse(method, "<unknown>"));
-        attributes.put("http.url", Objects.requireNonNullElse(req.uri(), "<unknown>"));
+        String resolvedMethod = Objects.requireNonNullElse(method, "<unknown>");
+        String resolvedUri = Objects.requireNonNullElse(req.uri(), "<unknown>");
+        attributes.put("http.method", resolvedMethod);
+        // OTel HTTP server SemConv (https://opentelemetry.io/docs/specs/semconv/http/http-spans/):
+        // http.request.method MUST be "_OTHER" for methods unknown to the instrumentation.
+        attributes.put("http.request.method", method != null ? method : "_OTHER");
+        attributes.put("http.url", resolvedUri);
+        attributes.put("url.full", resolvedUri);
+        int queryIdx = resolvedUri.indexOf('?');
+        if (queryIdx >= 0) {
+            attributes.put("url.path", resolvedUri.substring(0, queryIdx));
+            attributes.put("url.query", resolvedUri.substring(queryIdx + 1));
+        } else {
+            attributes.put("url.path", resolvedUri);
+        }
         switch (req.getHttpRequest().protocolVersion()) {
-            case HTTP_1_0 -> attributes.put("http.flavour", "1.0");
-            case HTTP_1_1 -> attributes.put("http.flavour", "1.1");
+            case HTTP_1_0 -> {
+                attributes.put("http.flavour", "1.0");
+                attributes.put("network.protocol.version", "1.0");
+            }
+            case HTTP_1_1 -> {
+                attributes.put("http.flavour", "1.1");
+                attributes.put("network.protocol.version", "1.1");
+            }
         }
 
         tracer.startTrace(threadContext, channel.request(), name, attributes);
@@ -650,14 +669,14 @@ public class RestController implements HttpServerTransport.Dispatcher {
         }
     }
 
-    Iterator<MethodHandlers> getAllHandlers(@Nullable Map<String, String> requestParamsRef, String rawPath) {
+    Iterator<MethodHandlers> getAllHandlers(@Nullable RequestParams requestParamsRef, String rawPath) {
         final Supplier<Map<String, String>> paramsSupplier;
         if (requestParamsRef == null) {
             paramsSupplier = () -> null;
         } else {
             // Between retrieving the correct path, we need to reset the parameters,
             // otherwise parameters are parsed out of the URI that aren't actually handled.
-            final Map<String, String> originalParams = Map.copyOf(requestParamsRef);
+            final RequestParams originalParams = RequestParams.copyOf(requestParamsRef);
             paramsSupplier = () -> {
                 // PathTrie modifies the request, so reset the params between each iteration
                 requestParamsRef.clear();
@@ -882,7 +901,7 @@ public class RestController implements HttpServerTransport.Dispatcher {
 
     // exposed for tests; marked as UpdateForV10 because this assertion should have flushed out all double-close bugs by the time v10 is
     // released so we should be able to drop the tests that check we behave reasonably in production on this impossible path
-    @UpdateForV10(owner = UpdateForV10.Owner.DISTRIBUTED_COORDINATION)
+    @UpdateForV10(owner = UpdateForV10.Owner.DISTRIBUTED)
     static boolean PERMIT_DOUBLE_RESPONSE = false;
 
     private static final class ResourceHandlingHttpChannel extends DelegatingRestChannel {

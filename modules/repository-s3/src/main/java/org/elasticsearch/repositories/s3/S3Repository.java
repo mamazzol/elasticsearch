@@ -63,7 +63,6 @@ import java.util.concurrent.atomic.AtomicReference;
  * <dl>
  * <dt>{@code bucket}</dt><dd>S3 bucket</dd>
  * <dt>{@code base_path}</dt><dd>Specifies the path within bucket to repository data. Defaults to root directory.</dd>
- * <dt>{@code concurrent_streams}</dt><dd>Number of concurrent read/write stream (per repository on each node). Defaults to 5.</dd>
  * <dt>{@code chunk_size}</dt>
  * <dd>Large file can be divided into chunks. This parameter specifies the chunk size. Defaults to not chucked.</dd>
  * <dt>{@code compress}</dt><dd>If set to true metadata files will be stored compressed. Defaults to false.</dd>
@@ -133,18 +132,6 @@ class S3Repository extends MeteredBlobStoreRepository {
         DEFAULT_BUFFER_SIZE,
         MIN_PART_SIZE_USING_MULTIPART,
         MAX_PART_SIZE_USING_MULTIPART
-    );
-
-    /**
-     * Maximum size allowed for copy without multipart.
-     * Objects larger than this will be copied using multipart copy. S3 enforces a minimum multipart size of 5 MiB and a maximum
-     * non-multipart copy size of 5 GiB. The default is to use the maximum allowable size in order to minimize request count.
-     */
-    static final Setting<ByteSizeValue> MAX_COPY_SIZE_BEFORE_MULTIPART = Setting.byteSizeSetting(
-        "max_copy_size_before_multipart",
-        MAX_FILE_SIZE,
-        MIN_PART_SIZE_USING_MULTIPART,
-        MAX_FILE_SIZE
     );
 
     /**
@@ -262,8 +249,6 @@ class S3Repository extends MeteredBlobStoreRepository {
 
     private final ByteSizeValue chunkSize;
 
-    private final ByteSizeValue maxCopySizeBeforeMultipart;
-
     private final boolean serverSideEncryption;
 
     private final String storageClass;
@@ -342,8 +327,6 @@ class S3Repository extends MeteredBlobStoreRepository {
             );
         }
 
-        this.maxCopySizeBeforeMultipart = MAX_COPY_SIZE_BEFORE_MULTIPART.get(metadata.settings());
-
         this.serverSideEncryption = SERVER_SIDE_ENCRYPTION_SETTING.get(metadata.settings());
 
         this.storageClass = STORAGE_CLASS_SETTING.get(metadata.settings());
@@ -374,13 +357,11 @@ class S3Repository extends MeteredBlobStoreRepository {
         }
 
         logger.debug(
-            "using bucket [{}], chunk_size [{}], server_side_encryption [{}], buffer_size [{}], "
-                + "max_copy_size_before_multipart [{}], cannedACL [{}], storageClass [{}]",
+            "using bucket [{}], chunk_size [{}], server_side_encryption [{}], buffer_size [{}], cannedACL [{}], storageClass [{}]",
             bucket,
             chunkSize,
             serverSideEncryption,
             bufferSize,
-            maxCopySizeBeforeMultipart,
             cannedACL,
             storageClass
         );
@@ -507,7 +488,6 @@ class S3Repository extends MeteredBlobStoreRepository {
             bucket,
             serverSideEncryption,
             bufferSize,
-            maxCopySizeBeforeMultipart,
             cannedACL,
             storageClass,
             supportsConditionalWrites,

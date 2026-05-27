@@ -7,17 +7,30 @@
 
 package org.elasticsearch.xpack.stateless.cache;
 
+import org.elasticsearch.action.ActionListener;
+import org.elasticsearch.action.support.RefCountingListener;
 import org.elasticsearch.blobcache.BlobCacheMetrics;
+import org.elasticsearch.blobcache.common.ByteRange;
 import org.elasticsearch.blobcache.shared.SharedBlobCacheService;
+import org.elasticsearch.cluster.node.DiscoveryNode;
+import org.elasticsearch.cluster.node.DiscoveryNodeRole;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.util.concurrent.EsExecutors;
 import org.elasticsearch.env.NodeEnvironment;
+import org.elasticsearch.index.store.PluggableDirectoryMetricsHolder;
 import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.xpack.stateless.StatelessPlugin;
+import org.elasticsearch.xpack.stateless.cache.reader.CacheBlobReader;
+import org.elasticsearch.xpack.stateless.cache.reader.LazyRangeMissingHandler;
+import org.elasticsearch.xpack.stateless.cache.reader.SequentialRangeMissingHandler;
+import org.elasticsearch.xpack.stateless.lucene.BlobStoreCacheDirectoryMetrics;
 import org.elasticsearch.xpack.stateless.lucene.FileCacheKey;
 
+import java.nio.ByteBuffer;
 import java.util.concurrent.Executor;
+import java.util.function.IntConsumer;
 import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 
 public class StatelessSharedBlobCacheService extends SharedBlobCacheService<FileCacheKey> {
 
@@ -26,15 +39,20 @@ public class StatelessSharedBlobCacheService extends SharedBlobCacheService<File
     private static final Executor IO_EXECUTOR = EsExecutors.DIRECT_EXECUTOR_SERVICE;
 
     private final Executor shardReadThreadPoolExecutor;
+    private final PluggableDirectoryMetricsHolder<BlobStoreCacheDirectoryMetrics> metricsHolder;
+    private final boolean hasSearchRole;
 
     public StatelessSharedBlobCacheService(
         NodeEnvironment environment,
         Settings settings,
         ThreadPool threadPool,
-        BlobCacheMetrics blobCacheMetrics
+        BlobCacheMetrics blobCacheMetrics,
+        PluggableDirectoryMetricsHolder<BlobStoreCacheDirectoryMetrics> metricsHolder
     ) {
         super(environment, settings, threadPool, IO_EXECUTOR, blobCacheMetrics);
         this.shardReadThreadPoolExecutor = threadPool.executor(StatelessPlugin.SHARD_READ_THREAD_POOL);
+        this.metricsHolder = metricsHolder;
+        this.hasSearchRole = DiscoveryNode.hasRole(settings, DiscoveryNodeRole.SEARCH_ROLE);
     }
 
     // for tests
@@ -43,10 +61,94 @@ public class StatelessSharedBlobCacheService extends SharedBlobCacheService<File
         Settings settings,
         ThreadPool threadPool,
         BlobCacheMetrics blobCacheMetrics,
-        LongSupplier relativeTimeInNanosSupplier
+        LongSupplier relativeTimeInNanosSupplier,
+        PluggableDirectoryMetricsHolder<BlobStoreCacheDirectoryMetrics> metricsHolder
     ) {
         super(environment, settings, threadPool, IO_EXECUTOR, blobCacheMetrics, relativeTimeInNanosSupplier);
         this.shardReadThreadPoolExecutor = IO_EXECUTOR;
+        this.metricsHolder = metricsHolder;
+        this.hasSearchRole = DiscoveryNode.hasRole(settings, DiscoveryNodeRole.SEARCH_ROLE);
+    }
+
+    /**
+     * Fetches and writes in cache a blob byte range, given the {@link CacheBlobReader} and the blob's associated {@link FileCacheKey}.
+     */
+    private void fetchRange(
+        FileCacheKey cacheKey,
+        ByteRange byteRange,
+        CacheBlobReader cacheBlobReader,
+        Object initiator,
+        Supplier<ByteBuffer> writeBufferSupplier,
+        IntConsumer bytesCopiedConsumer,
+        Executor fetchExecutor,
+        boolean force,
+        ActionListener<Void> listener,
+        String... threadPools
+    ) {
+        var startRegion = getRegion(byteRange.start());
+        var endRegion = getEndingRegion(byteRange.end());
+        try (RefCountingListener listeners = new RefCountingListener(listener)) {
+            for (int region = startRegion; region <= endRegion; region++) {
+                long regionRangeStart = Math.max(getRegionStart(region), byteRange.start());
+                long regionRangeEnd = Math.min(getRegionEnd(region), byteRange.end());
+                var adjustedByteRange = cacheBlobReader.getRange(
+                    regionRangeStart,
+                    Math.toIntExact(regionRangeEnd - regionRangeStart),
+                    byteRange.end() - regionRangeStart
+                );
+                fetchRange(
+                    cacheKey,
+                    region,
+                    adjustedByteRange,
+                    // this is not really used
+                    byteRange.length(),
+                    new LazyRangeMissingHandler<>(
+                        () -> new SequentialRangeMissingHandler(
+                            initiator,
+                            cacheKey.fileName(),
+                            adjustedByteRange,
+                            cacheBlobReader,
+                            () -> writeBufferSupplier.get().clear(),
+                            bytesCopiedConsumer,
+                            threadPools
+                        )
+                    ),
+                    fetchExecutor,
+                    force,
+                    listeners.acquire().map(populated -> null)
+                );
+            }
+        }
+    }
+
+    void fetchRange(
+        FileCacheKey cacheKey,
+        ByteRange byteRange,
+        CacheBlobReader cacheBlobReader,
+        Object initiator,
+        Supplier<ByteBuffer> writeBufferSupplier,
+        IntConsumer bytesCopiedConsumer,
+        Executor fetchExecutor,
+        boolean force,
+        ActionListener<Void> listener
+    ) {
+        fetchRange(
+            cacheKey,
+            byteRange,
+            cacheBlobReader,
+            initiator,
+            writeBufferSupplier,
+            bytesCopiedConsumer,
+            fetchExecutor,
+            force,
+            listener,
+            StatelessPlugin.PREWARM_THREAD_POOL,
+            StatelessPlugin.FILL_VIRTUAL_BATCHED_COMPOUND_COMMIT_CACHE_THREAD_POOL
+        );
+    }
+
+    public boolean hasSearchRole() {
+        return hasSearchRole;
     }
 
     public void assertInvariants() {
@@ -73,7 +175,16 @@ public class StatelessSharedBlobCacheService extends SharedBlobCacheService<File
     }
 
     @Override
+    public long getRegionStart(int region) {
+        return super.getRegionStart(region);
+    }
+
+    @Override
     public long getRegionEnd(int region) {
         return super.getRegionEnd(region);
+    }
+
+    public PluggableDirectoryMetricsHolder<BlobStoreCacheDirectoryMetrics> metricsHolder() {
+        return metricsHolder;
     }
 }

@@ -106,7 +106,7 @@ public class AsyncCountersAdapterTests extends ESTestCase {
         registry.registerLongAsyncCounter("es.test.name.total", "desc", "unit", () -> new LongWithAttributes(1, Map.of("index", "index1")));
 
         AssertionError error = assertThrows(AssertionError.class, otelMeter::collectMetrics);
-        assertThat(error.getMessage(), containsString("Attribute name [index] is forbidden"));
+        assertThat(error.getMessage(), containsString("Attribute [index] of [es.test.name.total] is forbidden"));
     }
 
     public void testDoubleWithInvalidAttribute() {
@@ -118,7 +118,7 @@ public class AsyncCountersAdapterTests extends ESTestCase {
         );
 
         AssertionError error = assertThrows(AssertionError.class, otelMeter::collectMetrics);
-        assertThat(error.getMessage(), containsString("Attribute name [es_has_timestamp] is forbidden"));
+        assertThat(error.getMessage(), containsString("Attribute [es_has_timestamp] of [es.test.name.total] is forbidden"));
     }
 
     public void testNullRecord() throws Exception {
@@ -141,5 +141,41 @@ public class AsyncCountersAdapterTests extends ESTestCase {
         otelMeter.collectMetrics();
         metrics = otelMeter.getRecorder().getMeasurements(lcounter);
         assertThat(metrics, hasSize(0));
+    }
+
+    public void testLongAsyncCounterIsRemovedFromTheRegistryAfterClosing() throws Exception {
+        var counter = registry.registerLongAsyncCounter("es.test.name.total", "desc", "thingies", () -> new LongWithAttributes(42));
+
+        otelMeter.collectMetrics();
+        var metrics = otelMeter.getRecorder().getMeasurements(counter);
+        assertThat(metrics, hasSize(1));
+        assertThat(metrics.get(0).getLong(), equalTo(42L));
+
+        counter.close();
+
+        otelMeter.getRecorder().resetCalls();
+        otelMeter.collectMetrics();
+        metrics = otelMeter.getRecorder().getMeasurements(counter);
+        assertThat("OTel SDK does not record anything anymore after the instrument is closed", metrics, hasSize(0));
+
+        assertNull("Instrument is removed from the registry after closing", registry.getLongAsyncCounter(counter.getName()));
+    }
+
+    public void testDoubleAsyncCounterIsRemovedFromTheRegistryAfterClosing() throws Exception {
+        var counter = registry.registerDoubleAsyncCounter("es.test.name.total", "desc", "thingies", () -> new DoubleWithAttributes(42.0));
+
+        otelMeter.collectMetrics();
+        var metrics = otelMeter.getRecorder().getMeasurements(counter);
+        assertThat(metrics, hasSize(1));
+        assertThat(metrics.get(0).getDouble(), equalTo(42.0));
+
+        counter.close();
+
+        otelMeter.getRecorder().resetCalls();
+        otelMeter.collectMetrics();
+        metrics = otelMeter.getRecorder().getMeasurements(counter);
+        assertThat("OTel SDK does not record anything anymore after the instrument is closed", metrics, hasSize(0));
+
+        assertNull("Instrument is removed from the registry after closing", registry.getDoubleAsyncCounter(counter.getName()));
     }
 }

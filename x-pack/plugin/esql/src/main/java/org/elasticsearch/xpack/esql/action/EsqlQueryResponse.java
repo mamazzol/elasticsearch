@@ -30,6 +30,8 @@ import org.elasticsearch.xpack.core.esql.action.EsqlResponse;
 import org.elasticsearch.xpack.esql.core.type.DataType;
 
 import java.io.IOException;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
@@ -51,6 +53,7 @@ public class EsqlQueryResponse extends org.elasticsearch.xpack.core.esql.action.
     );
     private static final TransportVersion ESQL_PROFILE_INCLUDE_PLAN = TransportVersion.fromName("esql_profile_include_plan");
     private static final TransportVersion ESQL_TIMESTAMPS_INFO = TransportVersion.fromName("esql_timestamps_info");
+    private static final TransportVersion ESQL_RESPONSE_TIMEZONE_FORMAT = TransportVersion.fromName("esql_response_timezone_format");
 
     public static final String DROP_NULL_COLUMNS_OPTION = "drop_null_columns";
 
@@ -69,6 +72,8 @@ public class EsqlQueryResponse extends org.elasticsearch.xpack.core.esql.action.
     private final long startTimeMillis;
     private final long expirationTimeMillis;
 
+    private final ZoneId zoneId;
+
     public EsqlQueryResponse(
         List<ColumnInfoImpl> columns,
         List<Page> pages,
@@ -79,6 +84,7 @@ public class EsqlQueryResponse extends org.elasticsearch.xpack.core.esql.action.
         @Nullable String asyncExecutionId,
         boolean isRunning,
         boolean isAsync,
+        ZoneId zoneId,
         long startTimeMillis,
         long expirationTimeMillis,
         EsqlExecutionInfo executionInfo
@@ -92,6 +98,7 @@ public class EsqlQueryResponse extends org.elasticsearch.xpack.core.esql.action.
         this.asyncExecutionId = asyncExecutionId;
         this.isRunning = isRunning;
         this.isAsync = isAsync;
+        this.zoneId = zoneId;
         this.startTimeMillis = startTimeMillis;
         this.expirationTimeMillis = expirationTimeMillis;
         this.executionInfo = executionInfo;
@@ -105,6 +112,7 @@ public class EsqlQueryResponse extends org.elasticsearch.xpack.core.esql.action.
         @Nullable Profile profile,
         boolean columnar,
         boolean isAsync,
+        ZoneId zoneId,
         long startTimeMillis,
         long expirationTimeMillis,
         EsqlExecutionInfo executionInfo
@@ -119,6 +127,7 @@ public class EsqlQueryResponse extends org.elasticsearch.xpack.core.esql.action.
             null,
             false,
             isAsync,
+            zoneId,
             startTimeMillis,
             expirationTimeMillis,
             executionInfo
@@ -141,34 +150,49 @@ public class EsqlQueryResponse extends org.elasticsearch.xpack.core.esql.action.
         boolean isRunning = in.readBoolean();
         boolean isAsync = in.readBoolean();
         List<ColumnInfoImpl> columns = in.readCollectionAsList(ColumnInfoImpl::new);
-        List<Page> pages = in.readCollectionAsList(Page::new);
-        long documentsFound = supportsValuesLoaded(in.getTransportVersion()) ? in.readVLong() : 0;
-        long valuesLoaded = supportsValuesLoaded(in.getTransportVersion()) ? in.readVLong() : 0;
-        Profile profile = in.readOptionalWriteable(Profile::readFrom);
-        boolean columnar = in.readBoolean();
+        List<Page> pages = in.readReleasableCollectionAsList(Page::new);
+        boolean success = false;
+        try {
+            long documentsFound = supportsValuesLoaded(in.getTransportVersion()) ? in.readVLong() : 0;
+            long valuesLoaded = supportsValuesLoaded(in.getTransportVersion()) ? in.readVLong() : 0;
+            Profile profile = in.readOptionalWriteable(Profile::readFrom);
+            boolean columnar = in.readBoolean();
 
-        long startTimeMillis = 0L;
-        long expirationTimeMillis = 0L;
-        if (in.getTransportVersion().supports(ESQL_TIMESTAMPS_INFO)) {
-            startTimeMillis = in.readLong();
-            expirationTimeMillis = in.readLong();
+            long startTimeMillis = 0L;
+            long expirationTimeMillis = 0L;
+            if (in.getTransportVersion().supports(ESQL_TIMESTAMPS_INFO)) {
+                startTimeMillis = in.readLong();
+                expirationTimeMillis = in.readLong();
+            }
+
+            ZoneId zoneId = ZoneOffset.UTC;
+            if (in.getTransportVersion().supports(ESQL_RESPONSE_TIMEZONE_FORMAT)) {
+                zoneId = in.readZoneId();
+            }
+
+            EsqlExecutionInfo executionInfo = in.readOptionalWriteable(EsqlExecutionInfo::new);
+            EsqlQueryResponse response = new EsqlQueryResponse(
+                columns,
+                pages,
+                documentsFound,
+                valuesLoaded,
+                profile,
+                columnar,
+                asyncExecutionId,
+                isRunning,
+                isAsync,
+                zoneId,
+                startTimeMillis,
+                expirationTimeMillis,
+                executionInfo
+            );
+            success = true;
+            return response;
+        } finally {
+            if (success == false) {
+                Releasables.close(pages);
+            }
         }
-
-        EsqlExecutionInfo executionInfo = in.readOptionalWriteable(EsqlExecutionInfo::new);
-        return new EsqlQueryResponse(
-            columns,
-            pages,
-            documentsFound,
-            valuesLoaded,
-            profile,
-            columnar,
-            asyncExecutionId,
-            isRunning,
-            isAsync,
-            startTimeMillis,
-            expirationTimeMillis,
-            executionInfo
-        );
     }
 
     @Override
@@ -190,6 +214,10 @@ public class EsqlQueryResponse extends org.elasticsearch.xpack.core.esql.action.
             out.writeLong(expirationTimeMillis);
         }
 
+        if (out.getTransportVersion().supports(ESQL_RESPONSE_TIMEZONE_FORMAT)) {
+            out.writeZoneId(zoneId);
+        }
+
         out.writeOptionalWriteable(executionInfo);
     }
 
@@ -201,23 +229,23 @@ public class EsqlQueryResponse extends org.elasticsearch.xpack.core.esql.action.
         return columns;
     }
 
-    List<Page> pages() {
+    public List<Page> pages() {
         return pages;
     }
 
     public Iterator<Iterator<Object>> values() {
         List<DataType> dataTypes = columns.stream().map(ColumnInfoImpl::type).toList();
-        return ResponseValueUtils.pagesToValues(dataTypes, pages);
+        return ResponseValueUtils.pagesToValues(dataTypes, pages, zoneId);
     }
 
     public Iterable<Iterable<Object>> rows() {
         List<DataType> dataTypes = columns.stream().map(ColumnInfoImpl::type).toList();
-        return ResponseValueUtils.valuesForRowsInPages(dataTypes, pages);
+        return ResponseValueUtils.valuesForRowsInPages(dataTypes, pages, zoneId);
     }
 
     public Iterator<Object> column(int columnIndex) {
         if (columnIndex < 0 || columnIndex >= columns.size()) throw new IllegalArgumentException();
-        return ResponseValueUtils.valuesForColumn(columnIndex, columns.get(columnIndex).type(), pages);
+        return ResponseValueUtils.valuesForColumn(columnIndex, columns.get(columnIndex).type(), pages, zoneId);
     }
 
     /**
@@ -250,6 +278,10 @@ public class EsqlQueryResponse extends org.elasticsearch.xpack.core.esql.action.
 
     public boolean isAsync() {
         return isAsync;
+    }
+
+    public ZoneId zoneId() {
+        return zoneId;
     }
 
     public boolean isPartial() {
@@ -315,7 +347,10 @@ public class EsqlQueryResponse extends org.elasticsearch.xpack.core.esql.action.
             content.add(ResponseXContentUtils.allColumns(columns, "columns"));
         }
         content.add(
-            ChunkedToXContentHelper.array("values", ResponseXContentUtils.columnValues(this.columns, this.pages, columnar, nullColumns))
+            ChunkedToXContentHelper.array(
+                "values",
+                ResponseXContentUtils.columnValues(this.columns, this.pages, columnar, nullColumns, zoneId)
+            )
         );
         if (executionInfo != null && executionInfo.hasMetadataToReport()) {
             content.add(ChunkedToXContentHelper.field("_clusters", executionInfo, params));
@@ -324,8 +359,7 @@ public class EsqlQueryResponse extends org.elasticsearch.xpack.core.esql.action.
             content.add(ChunkedToXContentHelper.startObject("profile"));
             content.add(ChunkedToXContentHelper.chunk((b, p) -> {
                 if (executionInfo != null) {
-                    b.field("query", executionInfo.overallTimeSpan());
-                    executionInfo.planningProfile().toXContent(b, p);
+                    executionInfo.queryProfile().toXContent(b, p);
                 }
                 return b;
             }));
@@ -442,6 +476,10 @@ public class EsqlQueryResponse extends org.elasticsearch.xpack.core.esql.action.
         }
         esqlResponse = new EsqlResponseImpl(this);
         return esqlResponse;
+    }
+
+    public long getRowCount() {
+        return pages.stream().mapToLong(Page::getPositionCount).sum();
     }
 
     public record Profile(List<DriverProfile> drivers, List<PlanProfile> plans, TransportVersion minimumVersion) implements Writeable {
